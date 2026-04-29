@@ -1,0 +1,55 @@
+# Realistic occupancy grid — all values in metres
+#
+# cell   0.05 m  →  200 x 150 cells for a 10 x 7.5 m space
+# walls  0.20 m thick  (4 cells)
+# doors  0.90 m wide   (18 cells)
+# robot  0.30 m radius (6 cells, set in simulation.py)
+#
+# Layout (y up, x right):
+#
+#  7.5 +-------+-------+--+--+-------+
+#      | rm C  |       |  |  | rm D  |
+#      |       | hall  |  |  |       |
+#  3.9 +--+----+       +--+  +-------+
+#      |  |         door        |
+#  3.7 +--+---------+--+--------+---+
+#      |            |               |
+#      |   rm A     |    rm B       |
+#      |            |  [pillar]     |
+#  0.0 +------------+---------------+
+#      0.0   4.3   4.5             10.0
+
+size 10.0 7.5
+cell 0.05
+
+# ── Horizontal dividing wall at y=3.75 m ─────────────────────────────────
+# left segment:  x 0.0 → 3.7 m
+rect  0.00,3.75   3.70,3.95
+# right segment: x 4.60 → 10.0 m  (door gap 3.70–4.60 = 0.90 m)
+rect  4.60,3.75  10.00,3.95
+
+# ── Vertical wall at x=4.50 m ────────────────────────────────────────────
+# lower section: y 0.00 → 3.00 m
+rect  4.50,0.00   4.70,3.00
+# upper section: y 3.95 → 5.50 m  (gap 3.00–3.95 is the doorway)
+rect  4.50,3.95   4.70,5.50
+# (above 5.50 m is open — passage to top corridor)
+
+# ── Vertical wall at x=7.25 m (upper half only) ──────────────────────────
+# lower section: y 3.95 → 6.40 m
+rect  7.25,3.95   7.45,6.40
+# upper section: y 6.70 → 7.50 m  (door gap 6.40–6.70 = 0.30 m)
+rect  7.25,6.70   7.45,7.50
+
+# ── Pillar in room B ──────────────────────────────────────────────────────
+rect  5.50,0.75   6.50,1.75
+
+# ── Alcove wall stub in room A ────────────────────────────────────────────
+rect  1.00,2.00   1.10,3.40
+
+# ── Small obstacles in the hallway ───────────────────────────────────────
+rect  4.80,4.10   5.00,4.50
+rect  4.80,5.00   5.00,5.40
+
+start  0.50  0.50
+goal   9.25  6.90
