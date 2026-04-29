@@ -24,7 +24,7 @@ import arcade
 
 from map import GridMap
 from robot import Robot
-from solver import BaseSolver, KeyboardSolver
+from solver import BaseSolver, KeyboardSolver, GradientSolver
 from vector_field import VectorField
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,17 @@ class Simulation(arcade.Window):
         # Instantiate modules
         # ------------------------------------------------------------------
         self.vector_field = VectorField()
-        self.solver: BaseSolver = KeyboardSolver()
+
+        # Ordered list of available solvers — Tab cycles through them
+        self._solvers: list[BaseSolver] = [
+            KeyboardSolver(),
+            GradientSolver(),
+        ]
+        self._solver_idx: int = 0
+        self.solver: BaseSolver = self._solvers[0]
+
+        # Pause — Space freezes robot movement but keeps rendering
+        self._paused: bool = False
 
         # Place robot at the map start position
         gx_s, gy_s = grid_map.start
@@ -189,6 +199,8 @@ class Simulation(arcade.Window):
 
     def on_update(self, delta_time: float) -> None:
         """Called every frame. Query solver then advance robot dynamics."""
+        if self._paused:
+            return
         v, omega = self.solver.solve(
             self.robot.state,
             self.vector_field,
@@ -218,6 +230,11 @@ class Simulation(arcade.Window):
             self._view_gradient = not self._view_gradient
         elif key == arcade.key.Q:
             self._show_ui = not self._show_ui
+        elif key == arcade.key.SPACE:
+            self._paused = not self._paused
+        elif key == arcade.key.TAB:
+            self._solver_idx = (self._solver_idx + 1) % len(self._solvers)
+            self.solver = self._solvers[self._solver_idx]
         self.solver.on_key_press(key)
 
     def on_key_release(self, key: int, modifiers: int) -> None:
@@ -453,7 +470,7 @@ class Simulation(arcade.Window):
         font_size = 12
         line_h = 18
         pad = 8
-        n_lines = 5
+        n_lines = 6
         start_y = self.height - pad - font_size
         return [
             arcade.Text(
@@ -475,12 +492,14 @@ class Simulation(arcade.Window):
         gx, gy = self.grid_map.world_to_grid(x_m, y_m)
 
         view_label = "gradient φ" if self._view_gradient else "normal"
+        paused_label = "PAUSED" if self._paused else "running"
         strings = [
             f"pos : ({x_m:.2f} m, {y_m:.2f} m)  cell: ({gx}, {gy})",
             f"\u03b8   : {th_d:+.1f}\u00b0",
             f"v   : {self._last_v:.3f} m/s    \u03c9: {self._last_omega:.3f} rad/s",
-            f"view: {view_label}",
-            "[ESC] quit    [V] field view    [Q] toggle UI    [WASD] drive",
+            f"solver: {self.solver.NAME:<12}  {paused_label}",
+            f"view  : {view_label}",
+            "[ESC] quit  [SPACE] pause  [TAB] solver  [V] view  [Q] UI  [WASD] drive",
         ]
 
         for t, s in zip(self._hud_texts, strings):
@@ -492,7 +511,7 @@ class Simulation(arcade.Window):
         line_h = 18
         pad = 8
         panel_h = len(strings) * line_h + pad * 2
-        panel_w = 430
+        panel_w = 510
         arcade.draw_lbwh_rectangle_filled(
             0,
             self.height - panel_h,
