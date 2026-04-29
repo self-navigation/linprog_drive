@@ -48,6 +48,20 @@ Example:
         metavar="FPS",
         help="Target simulation frame rate (default: 60).",
     )
+    parser.add_argument(
+        "--repulsion-radius",
+        type=float,
+        default=0.6,
+        metavar="M",
+        help="Obstacle repulsion radius in metres (default: 0.6).",
+    )
+    parser.add_argument(
+        "--repulsion-alpha",
+        type=float,
+        default=5.0,
+        metavar="A",
+        help="Repulsion cost weight at obstacle boundary (default: 5.0, 0=off).",
+    )
     return parser.parse_args()
 
 
@@ -85,7 +99,12 @@ def main():
 
     from simulation import Simulation
 
-    sim = Simulation(grid_map, cell_px=args.cell_px)
+    sim = Simulation(
+        grid_map,
+        cell_px=args.cell_px,
+        repulsion_radius=args.repulsion_radius,
+        repulsion_alpha=args.repulsion_alpha,
+    )
     sim.set_update_rate(1.0 / args.fps)
     arcade.run()
 

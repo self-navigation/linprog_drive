@@ -78,7 +78,13 @@ class Simulation(arcade.Window):
       - Provide keyboard shortcuts (ESC to quit, R to reset — later).
     """
 
-    def __init__(self, grid_map: GridMap, cell_px: int = 24):
+    def __init__(
+        self,
+        grid_map: GridMap,
+        cell_px: int = 24,
+        repulsion_radius: float = 0.6,
+        repulsion_alpha: float = 5.0,
+    ):
         self.grid_map = grid_map
         self.cell_px = cell_px
 
@@ -112,7 +118,12 @@ class Simulation(arcade.Window):
         # Compute vector field (Dijkstra geodesic distances — runs once at startup)
         gx_g, gy_g = grid_map.goal
         goal_world = grid_map.grid_to_world(gx_g, gy_g)
-        self.vector_field.compute(grid_map, goal_world)
+        self.vector_field.compute(
+            grid_map,
+            goal_world,
+            repulsion_radius=repulsion_radius,
+            repulsion_alpha=repulsion_alpha,
+        )
 
         # Track last commands for HUD display
         self._last_v: float = 0.0
