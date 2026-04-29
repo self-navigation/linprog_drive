@@ -23,9 +23,11 @@ import numpy as np
 import arcade
 
 from map import GridMap
+from robot import Robot
+from solver import BaseSolver, KeyboardSolver
 
 # ---------------------------------------------------------------------------
-# Dummy stubs — will be replaced in later implementation steps
+# Dummy stub — will be replaced by vector_field.py in a later step
 # ---------------------------------------------------------------------------
 
 
@@ -37,97 +39,20 @@ class VectorField:
     """
 
     def compute(self, grid_map: GridMap, goal_world: Tuple[float, float]) -> None:
-        """Precompute the field for the given map and goal.  (No-op for now.)"""
         pass
 
     def query(self, wx: float, wy: float) -> np.ndarray:
-        """Return the unit navigation vector at world position (wx, wy)."""
         return np.zeros(2)
 
     def potential(self, wx: float, wy: float) -> float:
-        """Return the scalar potential φ at world position (wx, wy)."""
         return 0.0
-
-
-class Robot:
-    """
-    Unicycle robot with Euler-integrated dynamics.
-
-    State vector: [x (m), y (m), θ (rad)]
-    Input:        v (m/s forward speed), ω (rad/s turn rate)
-    """
-
-    def __init__(self, x: float, y: float, theta: float = 0.0):
-        self.state = np.array([x, y, theta], dtype=float)
-        # Last commanded inputs — used as linearisation point in LP
-        self.v_last: float = 0.0
-        self.omega_last: float = 0.0
-
-    # -- Convenience accessors ------------------------------------------
-
-    @property
-    def x(self) -> float:
-        return float(self.state[0])
-
-    @property
-    def y(self) -> float:
-        return float(self.state[1])
-
-    @property
-    def theta(self) -> float:
-        return float(self.state[2])
-
-    # -- Dynamics ---------------------------------------------------------
-
-    def step(self, v: float, omega: float, dt: float) -> None:
-        """
-        Integrate unicycle dynamics one step forward.
-
-            x_new = x + v·cos(θ)·dt
-            y_new = y + v·sin(θ)·dt
-            θ_new = θ + ω·dt          (wrapped to [-π, π])
-        """
-        # Dummy: no movement until LPOCP provides real commands.
-        # Uncomment below when robot.step() is wired to the real solver:
-        #
-        # x, y, th = self.state
-        # self.state[0] += v * math.cos(th) * dt
-        # self.state[1] += v * math.sin(th) * dt
-        # self.state[2] += omega * dt
-        # # Wrap heading to [-π, π]
-        # self.state[2] = (self.state[2] + math.pi) % (2 * math.pi) - math.pi
-        # self.v_last = v
-        # self.omega_last = omega
-        pass
-
-
-class LPOCP:
-    """
-    Dummy LP-based OCP solver.
-    Real implementation: linearised unicycle MPC assembled as a pure LP
-    and solved with a hand-written simplex method.
-    Returns zero commands until implemented.
-    """
-
-    def solve(
-        self,
-        state: np.ndarray,
-        vector_field: VectorField,
-        grid_map: GridMap,
-    ) -> Tuple[float, float]:
-        """
-        Given the current robot state and environment, return (v*, ω*).
-        """
-        return 0.0, 0.0
 
 
 # ---------------------------------------------------------------------------
 # Simulation window
 # ---------------------------------------------------------------------------
 
-# Physical robot radius in metres — determines rendered size on screen.
-# At 0.05 m/cell and 4 px/cell this is 0.3/0.05*4 = 24 px radius.
-ROBOT_RADIUS_M: float = 0.3
+# Robot radius comes from Robot.RADIUS_M so rendering and physics stay in sync.
 
 # Colour palette — all as RGBA 4-tuples (arcade 3.x requires alpha channel)
 _COL_OBSTACLE = (55, 55, 65, 255)
@@ -162,10 +87,10 @@ class Simulation(arcade.Window):
         self.background_color = _COL_BACKGROUND
 
         # ------------------------------------------------------------------
-        # Instantiate modules (dummies for now)
+        # Instantiate modules
         # ------------------------------------------------------------------
-        self.vector_field = VectorField()
-        self.lp_ocp = LPOCP()
+        self.vector_field = VectorField()  # dummy until vector_field.py
+        self.solver: BaseSolver = KeyboardSolver()  # swap for LP solver later
 
         # Place robot at the map start position
         gx_s, gy_s = grid_map.start
@@ -235,8 +160,8 @@ class Simulation(arcade.Window):
     # ------------------------------------------------------------------
 
     def on_update(self, delta_time: float) -> None:
-        """Called every frame. Solve LP OCP and advance robot dynamics."""
-        v, omega = self.lp_ocp.solve(
+        """Called every frame. Query solver then advance robot dynamics."""
+        v, omega = self.solver.solve(
             self.robot.state,
             self.vector_field,
             self.grid_map,
@@ -258,6 +183,10 @@ class Simulation(arcade.Window):
     def on_key_press(self, key: int, modifiers: int) -> None:
         if key == arcade.key.ESCAPE:
             self.close()
+        self.solver.on_key_press(key)
+
+    def on_key_release(self, key: int, modifiers: int) -> None:
+        self.solver.on_key_release(key)
 
     # ------------------------------------------------------------------
     # Drawing helpers
@@ -280,7 +209,7 @@ class Simulation(arcade.Window):
 
         # Match the robot footprint size so the goal is clearly visible
         m_to_px = self.cell_px / self.grid_map.cell_size
-        r = ROBOT_RADIUS_M * m_to_px
+        r = Robot.RADIUS_M * m_to_px
 
         # Semi-transparent filled circle
         arcade.draw_circle_filled(cx, cy, r, _COL_GOAL_FILL)
@@ -311,7 +240,7 @@ class Simulation(arcade.Window):
         # Convert physical radius to screen pixels so the robot stays the
         # same physical size regardless of cell_px or cell_size.
         m_to_px = self.cell_px / self.grid_map.cell_size
-        r_body = ROBOT_RADIUS_M * m_to_px  # circle hull radius
+        r_body = Robot.RADIUS_M * m_to_px  # circle hull radius
         r_nose = r_body * 1.0
         r_rear = r_body * 0.8
 
