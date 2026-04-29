@@ -1,8 +1,8 @@
 """
 simulation.py — Arcade window, game loop, and rendering.
 
-Dummy stubs for VectorField, Robot, and LPOCP are defined here
-and will be replaced module by module in later implementation steps.
+VectorField, Robot, and solver live in their own modules.
+This file owns the arcade window, rendering, and key routing.
 
 Screen coordinate convention
 -----------------------------
@@ -25,28 +25,7 @@ import arcade
 from map import GridMap
 from robot import Robot
 from solver import BaseSolver, KeyboardSolver
-
-# ---------------------------------------------------------------------------
-# Dummy stub — will be replaced by vector_field.py in a later step
-# ---------------------------------------------------------------------------
-
-
-class VectorField:
-    """
-    Dummy vector field.
-    Real implementation: harmonic potential (Laplace solve).
-    Returns a zero vector everywhere until implemented.
-    """
-
-    def compute(self, grid_map: GridMap, goal_world: Tuple[float, float]) -> None:
-        pass
-
-    def query(self, wx: float, wy: float) -> np.ndarray:
-        return np.zeros(2)
-
-    def potential(self, wx: float, wy: float) -> float:
-        return 0.0
-
+from vector_field import VectorField
 
 # ---------------------------------------------------------------------------
 # Simulation window
@@ -64,6 +43,29 @@ _COL_ROBOT_FILL = (220, 60, 60, 255)
 _COL_ROBOT_EDGE = (140, 20, 20, 255)
 _COL_HUD_TEXT = (0, 0, 0, 255)
 _COL_BACKGROUND = (140, 143, 150, 255)  # matches free cell tone so gaps blend
+
+
+def _phi_to_color(phi: float) -> tuple:
+    """
+    Map a potential value φ ∈ [0, 1] to an RGBA colour.
+
+    Three-stop gradient:
+        0.0  →  green  (40, 180, 100)  — goal
+        0.5  →  blue   (50, 120, 210)  — mid-range
+        1.0  →  red    (200,  60,  50) — near obstacles
+    """
+    phi = max(0.0, min(1.0, phi))
+    if phi <= 0.5:
+        t = phi * 2.0  # 0 → 1 over first half
+        r = int(40 + t * (50 - 40))
+        g = int(180 + t * (120 - 180))
+        b = int(100 + t * (210 - 100))
+    else:
+        t = (phi - 0.5) * 2.0  # 0 → 1 over second half
+        r = int(50 + t * (200 - 50))
+        g = int(120 + t * (60 - 120))
+        b = int(210 + t * (50 - 210))
+    return (r, g, b, 255)
 
 
 class Simulation(arcade.Window):
@@ -89,15 +91,15 @@ class Simulation(arcade.Window):
         # ------------------------------------------------------------------
         # Instantiate modules
         # ------------------------------------------------------------------
-        self.vector_field = VectorField()  # dummy until vector_field.py
-        self.solver: BaseSolver = KeyboardSolver()  # swap for LP solver later
+        self.vector_field = VectorField()
+        self.solver: BaseSolver = KeyboardSolver()
 
         # Place robot at the map start position
         gx_s, gy_s = grid_map.start
         wx_s, wy_s = grid_map.grid_to_world(gx_s, gy_s)
         self.robot = Robot(wx_s, wy_s, theta=0.0)
 
-        # Pre-compute vector field for the goal (no-op with dummy)
+        # Compute vector field (Dijkstra geodesic distances — runs once at startup)
         gx_g, gy_g = grid_map.goal
         goal_world = grid_map.grid_to_world(gx_g, gy_g)
         self.vector_field.compute(grid_map, goal_world)
@@ -106,8 +108,15 @@ class Simulation(arcade.Window):
         self._last_v: float = 0.0
         self._last_omega: float = 0.0
 
-        # Build the static grid shape list once (drawn every frame cheaply)
-        self._grid_sprites = self._build_grid_sprites()
+        # View state: False = normal grid, True = potential gradient colourmap
+        self._view_gradient: bool = False
+
+        # Build both sprite lists (gradient list needs the solved φ array)
+        self._sprites_normal = self._build_sprites_normal()
+        self._sprites_gradient = self._build_sprites_gradient()
+
+        # Colorbar shown in gradient view
+        self._colorbar_sprites, self._colorbar_texts = self._build_colorbar()
 
         # Persistent Text objects — avoids draw_text PerformanceWarning
         self._hud_texts = self._build_hud_texts()
@@ -128,32 +137,49 @@ class Simulation(arcade.Window):
         return px, py
 
     # ------------------------------------------------------------------
-    # Grid sprite list (static — rebuilt only on map/goal change)
+    # Grid sprite lists (built once after vector field is computed)
     # ------------------------------------------------------------------
 
-    def _build_grid_sprites(self) -> arcade.SpriteList:
-        """
-        Create one solid-colour sprite per cell.
-        Using a SpriteList gives batched OpenGL draws — fast even for
-        large grids.
-        """
-        sprite_list = arcade.SpriteList(use_spatial_hash=False)
-        inner = self.cell_px - 1  # 1-pixel gap acts as grid line
+    def _make_sprite(self, gx: int, gy: int, color: tuple) -> arcade.SpriteSolidColor:
+        inner = self.cell_px - 1
+        cx, cy = self.cell_center_screen(gx, gy)
+        return arcade.SpriteSolidColor(
+            width=inner, height=inner, center_x=cx, center_y=cy, color=color
+        )
 
+    def _build_sprites_normal(self) -> arcade.SpriteList:
+        """Standard view: dark obstacles, muted-grey free cells."""
+        sl = arcade.SpriteList(use_spatial_hash=False)
         for gy in range(self.grid_map.rows):
             for gx in range(self.grid_map.cols):
                 color = _COL_OBSTACLE if self.grid_map.grid[gy, gx] else _COL_FREE
-                cx, cy = self.cell_center_screen(gx, gy)
-                sprite = arcade.SpriteSolidColor(
-                    width=inner,
-                    height=inner,
-                    center_x=cx,
-                    center_y=cy,
-                    color=color,
-                )
-                sprite_list.append(sprite)
+                sl.append(self._make_sprite(gx, gy, color))
+        return sl
 
-        return sprite_list
+    def _build_sprites_gradient(self) -> arcade.SpriteList:
+        """
+        Gradient view: free cells coloured by harmonic potential φ.
+
+        Colour stops (φ ∈ [0, 1]):
+            0.0  →  green   (goal)
+            0.5  →  blue    (mid-range)
+            1.0  →  red     (near obstacles)
+
+        Obstacle cells keep their dark colour so walls remain visible.
+        """
+        sl = arcade.SpriteList(use_spatial_hash=False)
+        phi = self.vector_field.phi  # may be None if compute() not done yet
+
+        for gy in range(self.grid_map.rows):
+            for gx in range(self.grid_map.cols):
+                if self.grid_map.grid[gy, gx]:
+                    color = _COL_OBSTACLE
+                elif phi is None:
+                    color = _COL_FREE
+                else:
+                    color = _phi_to_color(float(phi[gy, gx]))
+                sl.append(self._make_sprite(gx, gy, color))
+        return sl
 
     # ------------------------------------------------------------------
     # Arcade callbacks
@@ -178,11 +204,15 @@ class Simulation(arcade.Window):
         self._draw_grid()
         self._draw_goal()
         self._draw_robot()
+        if self._view_gradient:
+            self._draw_colorbar()
         self._draw_hud()
 
     def on_key_press(self, key: int, modifiers: int) -> None:
         if key == arcade.key.ESCAPE:
             self.close()
+        elif key == arcade.key.V:
+            self._view_gradient = not self._view_gradient
         self.solver.on_key_press(key)
 
     def on_key_release(self, key: int, modifiers: int) -> None:
@@ -193,8 +223,11 @@ class Simulation(arcade.Window):
     # ------------------------------------------------------------------
 
     def _draw_grid(self) -> None:
-        """Render the pre-built cell sprite list."""
-        self._grid_sprites.draw()
+        """Render the active sprite list based on current view mode."""
+        if self._view_gradient:
+            self._sprites_gradient.draw()
+        else:
+            self._sprites_normal.draw()
 
     def _draw_goal(self) -> None:
         """
@@ -265,6 +298,148 @@ class Simulation(arcade.Window):
         # dot_r = max(2.0, r_body * 0.12)
         # arcade.draw_circle_filled(nose[0], nose[1], dot_r, (255, 255, 255, 220))
 
+    # ------------------------------------------------------------------
+    # Colour bar (gradient view only)
+    # ------------------------------------------------------------------
+
+    def _build_colorbar(self) -> tuple[arcade.SpriteList, list]:
+        """
+        Build a vertical colour-bar widget showing the φ → colour mapping.
+
+        Layout (right side of screen, vertically centred):
+
+            potential φ       ← title
+            ─────────────
+            1.0 ─┤ red   ┃   ← far from goal
+                  ┃  ...  ┃
+            0.5 ─┤ blue  ┃
+                  ┃  ...  ┃
+            0.0 ─┤ green ┃   ← goal
+            ─────────────
+
+        The bar is built once as a SpriteList (90 × 2 px strips) and the
+        text labels as arcade.Text objects so nothing is re-created each frame.
+        """
+        BAR_W = 16
+        BAR_H = 200
+        N_STRIPS = 100  # strips of 2 px each  → 200 px total
+        STRIP_H = BAR_H // N_STRIPS
+        PAD_RIGHT = 12  # pixels from right screen edge to bar right
+        FONT = 10
+
+        bar_right = self.width - PAD_RIGHT
+        bar_left = bar_right - BAR_W
+        bar_bottom = (self.height - BAR_H) // 2
+
+        # ── Coloured strips ───────────────────────────────────────────
+        sl = arcade.SpriteList(use_spatial_hash=False)
+        for i in range(N_STRIPS):
+            phi = i / (N_STRIPS - 1)  # 0 (bottom) → 1 (top)
+            color = _phi_to_color(phi)
+            cx = bar_left + BAR_W / 2
+            cy = bar_bottom + i * STRIP_H + STRIP_H / 2
+            sl.append(
+                arcade.SpriteSolidColor(
+                    width=BAR_W,
+                    height=STRIP_H,
+                    center_x=cx,
+                    center_y=cy,
+                    color=color,
+                )
+            )
+
+        # ── Tick labels (right-aligned to bar_left − 4) ───────────────
+        label_x = bar_left - 4  # labels sit left of the bar
+        tick_data = [
+            (bar_bottom, "0.0", "goal"),
+            (bar_bottom + BAR_H // 2, "0.5", ""),
+            (bar_bottom + BAR_H, "1.0", "far"),
+        ]
+
+        texts = []
+        for y, value, note in tick_data:
+            label = f"{value} {note}".strip()
+            texts.append(
+                arcade.Text(
+                    text=label,
+                    x=label_x,
+                    y=y - FONT // 2,
+                    color=(230, 230, 230, 255),
+                    font_size=FONT,
+                    font_name="monospace",
+                    anchor_x="right",
+                )
+            )
+
+        # ── Title centred above the bar ───────────────────────────────
+        texts.append(
+            arcade.Text(
+                text="potential  \u03c6",
+                x=bar_left + BAR_W // 2,
+                y=bar_bottom + BAR_H + 14,
+                color=(230, 230, 230, 255),
+                font_size=FONT,
+                font_name="monospace",
+                anchor_x="center",
+            )
+        )
+
+        return sl, texts
+
+    def _draw_colorbar(self) -> None:
+        """Draw the background panel, coloured bar, tick labels, and title."""
+        BAR_W = 16
+        BAR_H = 200
+        PAD_RIGHT = 12
+        LABEL_W = 70  # approximate width of widest label ("0.0 goal")
+        FONT = 10
+
+        bar_right = self.width - PAD_RIGHT
+        bar_left = bar_right - BAR_W
+        bar_bottom = (self.height - BAR_H) // 2
+
+        # Background panel sized to contain bar + labels + title
+        panel_pad = 8
+        panel_l = bar_left - LABEL_W - panel_pad
+        panel_b = bar_bottom - panel_pad
+        panel_w = LABEL_W + BAR_W + panel_pad * 2
+        panel_h = BAR_H + FONT + 20 + panel_pad * 2  # bar + title row
+
+        arcade.draw_lbwh_rectangle_filled(
+            panel_l,
+            panel_b,
+            panel_w,
+            panel_h,
+            (20, 20, 30, 210),
+        )
+
+        # Thin outline around the bar itself
+        arcade.draw_lbwh_rectangle_outline(
+            bar_left,
+            bar_bottom,
+            BAR_W,
+            BAR_H,
+            (160, 160, 160, 200),
+            border_width=1,
+        )
+
+        # Horizontal tick lines at 0, 0.5, 1
+        tick_ys = [bar_bottom, bar_bottom + BAR_H // 2, bar_bottom + BAR_H]
+        for ty in tick_ys:
+            arcade.draw_line(
+                bar_left - 4,
+                ty,
+                bar_left,
+                ty,
+                (200, 200, 200, 200),
+                1,
+            )
+
+        self._colorbar_sprites.draw()
+
+        for t in self._colorbar_texts:
+            t.draw()
+
     def _build_hud_texts(self) -> list:
         """
         Create one arcade.Text object per HUD line.
@@ -273,7 +448,7 @@ class Simulation(arcade.Window):
         font_size = 12
         line_h = 18
         pad = 8
-        n_lines = 4
+        n_lines = 5
         start_y = self.height - pad - font_size
         return [
             arcade.Text(
@@ -294,11 +469,13 @@ class Simulation(arcade.Window):
         th_d = math.degrees(self.robot.theta)
         gx, gy = self.grid_map.world_to_grid(x_m, y_m)
 
+        view_label = "gradient φ" if self._view_gradient else "normal"
         strings = [
             f"pos : ({x_m:.2f} m, {y_m:.2f} m)  cell: ({gx}, {gy})",
             f"\u03b8   : {th_d:+.1f}\u00b0",
             f"v   : {self._last_v:.3f} m/s    \u03c9: {self._last_omega:.3f} rad/s",
-            "[ESC] quit",
+            f"view: {view_label}",
+            "[ESC] quit    [V] toggle field view    [WASD] drive",
         ]
 
         for t, s in zip(self._hud_texts, strings):
@@ -310,7 +487,7 @@ class Simulation(arcade.Window):
         line_h = 18
         pad = 8
         panel_h = len(strings) * line_h + pad * 2
-        panel_w = 360
+        panel_w = 430
         arcade.draw_lbwh_rectangle_filled(
             0,
             self.height - panel_h,
