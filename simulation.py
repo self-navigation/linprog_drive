@@ -168,7 +168,7 @@ class Simulation(arcade.Window):
         )
         self._last_v = v
         self._last_omega = omega
-        self.robot.step(v, omega, delta_time)
+        self.robot.step(v, omega, delta_time, self.grid_map)
 
     def on_draw(self) -> None:
         """Called every frame to render the scene."""
