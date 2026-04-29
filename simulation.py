@@ -24,7 +24,7 @@ import arcade
 
 from map import GridMap
 from robot import Robot
-from solver import BaseSolver, KeyboardSolver, GradientSolver
+from solver import BaseSolver, KeyboardSolver, GradientSolver, LPSolver
 from vector_field import VectorField
 
 # ---------------------------------------------------------------------------
@@ -103,6 +103,7 @@ class Simulation(arcade.Window):
         self._solvers: list[BaseSolver] = [
             KeyboardSolver(),
             GradientSolver(),
+            LPSolver(),
         ]
         self._solver_idx: int = 0
         self.solver: BaseSolver = self._solvers[0]
@@ -508,7 +509,12 @@ class Simulation(arcade.Window):
             f"pos : ({x_m:.2f} m, {y_m:.2f} m)  cell: ({gx}, {gy})",
             f"\u03b8   : {th_d:+.1f}\u00b0",
             f"v   : {self._last_v:.3f} m/s    \u03c9: {self._last_omega:.3f} rad/s",
-            f"solver: {self.solver.NAME:<12}  {paused_label}",
+            f"solver: {self.solver.NAME:<12}  {paused_label}"
+            + (
+                f"  [{self.solver.last_status}]"
+                if hasattr(self.solver, "last_status")
+                else ""
+            ),
             f"view  : {view_label}",
             "[ESC] quit  [SPACE] pause  [TAB] solver  [V] view  [Q] UI  [WASD] drive",
         ]
