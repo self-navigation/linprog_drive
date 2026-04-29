@@ -110,6 +110,8 @@ class Simulation(arcade.Window):
 
         # View state: False = normal grid, True = potential gradient colourmap
         self._view_gradient: bool = False
+        # UI visibility toggle — hides HUD and colorbar when False
+        self._show_ui: bool = True
 
         # Build both sprite lists (gradient list needs the solved φ array)
         self._sprites_normal = self._build_sprites_normal()
@@ -204,15 +206,18 @@ class Simulation(arcade.Window):
         self._draw_grid()
         self._draw_goal()
         self._draw_robot()
-        if self._view_gradient:
-            self._draw_colorbar()
-        self._draw_hud()
+        if self._show_ui:
+            if self._view_gradient:
+                self._draw_colorbar()
+            self._draw_hud()
 
     def on_key_press(self, key: int, modifiers: int) -> None:
         if key == arcade.key.ESCAPE:
             self.close()
         elif key == arcade.key.V:
             self._view_gradient = not self._view_gradient
+        elif key == arcade.key.Q:
+            self._show_ui = not self._show_ui
         self.solver.on_key_press(key)
 
     def on_key_release(self, key: int, modifiers: int) -> None:
@@ -475,7 +480,7 @@ class Simulation(arcade.Window):
             f"\u03b8   : {th_d:+.1f}\u00b0",
             f"v   : {self._last_v:.3f} m/s    \u03c9: {self._last_omega:.3f} rad/s",
             f"view: {view_label}",
-            "[ESC] quit    [V] toggle field view    [WASD] drive",
+            "[ESC] quit    [V] field view    [Q] toggle UI    [WASD] drive",
         ]
 
         for t, s in zip(self._hud_texts, strings):
