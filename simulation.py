@@ -109,7 +109,7 @@ class Simulation(arcade.Window):
         self.solver: BaseSolver = self._solvers[0]
 
         # Pause — Space freezes robot movement but keeps rendering
-        self._paused: bool = False
+        self._paused: bool = True
 
         # Place robot at the map start position
         gx_s, gy_s = grid_map.start
