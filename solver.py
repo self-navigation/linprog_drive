@@ -231,7 +231,7 @@ class LPSolver(BaseSolver):
     NAME = "lp_mpc"
 
     # Horizon and timing
-    N: int = 10  # prediction horizon (steps)
+    N: int = 5  # prediction horizon (steps)
     DT: float = 0.10  # planning timestep (s) — independent of simulation fps
 
     # Reference speed (the "reference car" forward speed)
@@ -396,7 +396,7 @@ class LPSolver(BaseSolver):
                 bounds.append((0.0, None))  # s_k ≥ 0
 
         # ── Solve ─────────────────────────────────────────────────────
-        from scipy.optimize import linprog
+        from simplex import linprog
 
         result = linprog(
             c,
