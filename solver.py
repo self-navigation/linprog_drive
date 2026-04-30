@@ -14,13 +14,11 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Tuple
+from typing import Tuple
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from map import GridMap
-
+from map import GridMap
 
 # ---------------------------------------------------------------------------
 # Abstract interface
@@ -46,7 +44,7 @@ class BaseSolver(ABC):
         self,
         state: np.ndarray,  # [x, y, θ]
         vector_field,  # VectorField instance
-        grid_map: "GridMap",
+        grid_map: GridMap,
     ) -> Tuple[float, float]:  # (v m/s, ω rad/s)
         ...
 
@@ -93,7 +91,7 @@ class KeyboardSolver(BaseSolver):
         self,
         state: np.ndarray,
         vector_field,
-        grid_map: "GridMap",
+        grid_map: GridMap,
     ) -> Tuple[float, float]:
         import arcade  # deferred — no top-level arcade dependency
 
@@ -143,7 +141,7 @@ class GradientSolver(BaseSolver):
         self,
         state: np.ndarray,
         vector_field,
-        grid_map: "GridMap",
+        grid_map: GridMap,
     ) -> Tuple[float, float]:
         x, y, theta = float(state[0]), float(state[1]), float(state[2])
 
@@ -263,7 +261,7 @@ class LPSolver(BaseSolver):
         self,
         state: np.ndarray,
         vector_field,
-        grid_map: "GridMap",
+        grid_map: GridMap,
     ) -> Tuple[float, float]:
 
         x0, y0, theta0 = float(state[0]), float(state[1]), float(state[2])

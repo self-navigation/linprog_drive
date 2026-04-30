@@ -5,12 +5,11 @@ robot.py — Unicycle robot state, dynamics, and collision resolution.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from map import GridMap
+from map import GridMap
 
 
 class Robot:
@@ -84,7 +83,7 @@ class Robot:
         v: float,
         omega: float,
         dt: float,
-        grid_map: Optional["GridMap"] = None,
+        grid_map: Optional[GridMap] = None,
     ) -> None:
         """
         Advance state one Euler step of length dt seconds.
@@ -113,7 +112,7 @@ class Robot:
     # ------------------------------------------------------------------
 
     def _resolve_collision(
-        self, x: float, y: float, grid_map: "GridMap"
+        self, x: float, y: float, grid_map: GridMap
     ) -> tuple[float, float]:
         """
         Push (x, y) out of any obstacle cells it overlaps.

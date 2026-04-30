@@ -40,12 +40,11 @@ from __future__ import annotations
 
 import heapq
 import math
-from typing import TYPE_CHECKING, Tuple
+from typing import Tuple
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from map import GridMap
+from map import GridMap
 
 
 class VectorField:
@@ -97,7 +96,7 @@ class VectorField:
 
     def compute(
         self,
-        grid_map: "GridMap",
+        grid_map: GridMap,
         goal_world: Tuple[float, float],
         repulsion_radius: float = 0.6,
         repulsion_alpha: float = 5.0,
