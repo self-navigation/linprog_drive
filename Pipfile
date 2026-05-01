@@ -6,9 +6,9 @@ name = "pypi"
 [packages]
 numpy = "*"
 scipy = "*"
-matplotlib = "*"
 arcade = "*"
 scikit-fmm = "*"
+matplotlib = "*"
 
 [dev-packages]
 

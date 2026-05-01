@@ -160,7 +160,13 @@ def load_map_from_bitmap(path: str) -> GridMap:
     # invert
     grid = ~grid
 
-    return GridMap(grid, 0.05, (10, 10), (grid.shape[1] - 1, grid.shape[0] - 1))
+    # set the boundary cells forced to 1
+    grid[0, :] = 1
+    grid[-1, :] = 1
+    grid[:, 0] = 1
+    grid[:, -1] = 1
+
+    return GridMap(grid, 0.05, (10, 10), (grid.shape[1] - 10, grid.shape[0] - 10))
 
 
 def load_map(path: str) -> GridMap:
