@@ -25,7 +25,7 @@ import arcade
 from map import GridMap
 from robot import Robot
 from solver import BaseSolver, KeyboardSolver, GradientSolver, LPSolver
-from vector_field import VectorField
+from vector_field import FMMVectorField
 
 # ---------------------------------------------------------------------------
 # Simulation window
@@ -110,7 +110,7 @@ class Simulation(arcade.Window):
         # ------------------------------------------------------------------
         # Instantiate modules
         # ------------------------------------------------------------------
-        self.vector_field = VectorField()
+        self.vector_field = FMMVectorField()
 
         # Ordered list of available solvers — Tab cycles through them
         self._solvers: list[BaseSolver] = [

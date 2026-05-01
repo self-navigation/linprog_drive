@@ -1,8 +1,8 @@
 """
 vector_field.py — Navigation potential via cost-weighted geodesic distances.
 
-Pipeline
---------
+Pipeline (VectorField — Dijkstra-based)
+----------------------------------------
 1. EDT pass   — multi-source Dijkstra from every obstacle cell outward.
                 Produces d_obs[gy, gx]: distance (metres) to the nearest
                 obstacle for every free cell.
@@ -34,6 +34,24 @@ repulsion_alpha  : float   dimensionless — extra cost at obstacle boundary.
                            0 = pure Dijkstra (current behaviour).
                            3 = moderate repulsion.
                            10 = strong repulsion.
+
+FMMVectorField — Fast Marching Method (skfmm-based)
+-----------------------------------------------------
+Replaces the Dijkstra navigation pass with skfmm.travel_time(), which
+solves the Eikonal equation exactly on the continuous domain.
+
+Speed function: free cells travel at full speed (1.0); cells near
+obstacles travel slower via an exponential decay:
+    speed(d) = exp(-decay_rate * (1 - d/repulsion_radius))   d < radius
+    speed(d) = 1.0                                             d >= radius
+
+Obstacle cells are masked out so FMM skips them; they are then filled
+with an EDT-based depth penalty so the gradient inside walls always
+points toward the nearest free cell (recovery direction).
+
+An optional wall-repulsion potential and Gaussian direction smoothing
+(ported from the ROS2 FMMVectorFieldNode) are applied before the final
+unit-vector normalisation.
 """
 
 from __future__ import annotations
@@ -343,6 +361,245 @@ class VectorField:
 
     # ------------------------------------------------------------------
     # Bilinear interpolation (cell-centred)
+    # ------------------------------------------------------------------
+
+    def _bilinear(self, arr: np.ndarray, wx: float, wy: float) -> float:
+        cs = self._cs
+        rows, cols = arr.shape
+        gxf = wx / cs - 0.5
+        gx0 = int(math.floor(gxf))
+        tx = gxf - gx0
+        gyf = wy / cs - 0.5
+        gy0 = int(math.floor(gyf))
+        ty = gyf - gy0
+        gx0 = max(0, min(gx0, cols - 1))
+        gx1 = min(gx0 + 1, cols - 1)
+        gy0 = max(0, min(gy0, rows - 1))
+        gy1 = min(gy0 + 1, rows - 1)
+        return (
+            arr[gy0, gx0] * (1 - tx) * (1 - ty)
+            + arr[gy0, gx1] * tx * (1 - ty)
+            + arr[gy1, gx0] * (1 - tx) * ty
+            + arr[gy1, gx1] * tx * ty
+        )
+
+
+# ---------------------------------------------------------------------------
+# FMM-based vector field (ported from ROS2 FMMVectorFieldNode)
+# ---------------------------------------------------------------------------
+
+
+class FMMVectorField:
+    """
+    Navigation potential field computed via the Fast Marching Method.
+
+    Implements the same interface as VectorField so the simulation can
+    substitute it with a single line change.
+
+    Usage
+    -----
+    vf = FMMVectorField()
+    vf.compute(grid_map, goal_world)
+    direction = vf.query(wx, wy)   # unit vector toward goal
+    cost      = vf.potential(wx, wy)
+    """
+
+    ARRIVAL_RADIUS_M: float = 0.15
+    _GRAD_THRESHOLD: float = 1e-6
+
+    def __init__(self) -> None:
+        self._phi: np.ndarray | None = None
+        self._vx: np.ndarray | None = None
+        self._vy: np.ndarray | None = None
+        self._cs: float = 1.0
+        self._goal_world: tuple[float, float] | None = None
+        self._ready: bool = False
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    @property
+    def phi(self) -> np.ndarray | None:
+        return self._phi
+
+    # ------------------------------------------------------------------
+    # Public compute
+    # ------------------------------------------------------------------
+
+    def compute(
+        self,
+        grid_map: GridMap,
+        goal_world: Tuple[float, float],
+        repulsion_radius: float = 0.5,
+        repulsion_alpha: float = 5.0,
+        obstacle_slope_factor: float = 400.0,
+        field_smooth_sigma: float = 2.5,
+    ) -> None:
+        """
+        Run FMM on the occupancy grid and build the vector field.
+
+        Parameters
+        ----------
+        grid_map              : GridMap with boolean obstacle grid and cell_size.
+        goal_world            : (wx, wy) goal position in metres.
+        repulsion_radius      : Radius around obstacles where speed is reduced (m).
+        repulsion_alpha       : Exponential decay rate inside repulsion zone.
+                                Higher values = steeper speed drop near walls.
+        obstacle_slope_factor : Slope of the EDT fill inside obstacle cells
+                                (penalty = factor * max_T * depth_m).
+        field_smooth_sigma    : Gaussian blur sigma in cells applied to (vx, vy)
+                                before re-normalisation. 0 disables smoothing.
+        """
+        try:
+            import skfmm
+        except ImportError as exc:
+            raise ImportError(
+                "FMMVectorField requires skfmm: pip install scikit-fmm"
+            ) from exc
+        from scipy.ndimage import distance_transform_edt, gaussian_filter
+
+        self._cs = grid_map.cell_size
+        self._goal_world = goal_world
+        cs = grid_map.cell_size
+        obstacle_mask = grid_map.grid  # True = obstacle
+
+        gx_g, gy_g = grid_map.goal
+
+        if obstacle_mask[gy_g, gx_g]:
+            print("[FMMVectorField] Goal cell is inside an obstacle — aborting.")
+            return
+
+        # ── Speed field from occupancy grid ───────────────────────────
+        # Free cells near obstacles travel slower; obstacle cells are masked.
+        free_mask = ~obstacle_mask
+        if obstacle_mask.any() and free_mask.any():
+            edt_free = distance_transform_edt(free_mask) * cs
+        else:
+            edt_free = np.full(obstacle_mask.shape, np.inf)
+
+        speed = np.ones(obstacle_mask.shape, dtype=np.float64)
+        if repulsion_radius > 0.0 and repulsion_alpha > 0.0:
+            near = free_mask & (edt_free < repulsion_radius)
+            norm_d = edt_free[near] / repulsion_radius  # 0 at wall, 1 at boundary
+            speed[near] = np.clip(np.exp(-repulsion_alpha * (1.0 - norm_d)), 0.01, 1.0)
+        speed[obstacle_mask] = 0.0  # will be masked out in FMM
+
+        speed_ma = np.ma.MaskedArray(speed, mask=obstacle_mask)
+
+        # ── FMM: solve Eikonal from goal ───────────────────────────────
+        phi_init = np.ones(obstacle_mask.shape, dtype=np.float64)
+        phi_init[gy_g, gx_g] = -1.0
+        phi_ma = np.ma.MaskedArray(phi_init, mask=obstacle_mask)
+
+        try:
+            travel_time = skfmm.travel_time(phi_ma, speed_ma, dx=cs)
+        except Exception as exc:
+            print(f"[FMMVectorField] FMM failed: {exc}")
+            return
+
+        tt = np.array(travel_time, dtype=np.float64)
+        if np.ma.is_masked(travel_time):
+            tt[travel_time.mask] = np.nan
+
+        # ── Fill obstacle cells with EDT-depth penalty ─────────────────
+        obs_nan = np.isnan(tt)
+        max_T = float(np.nanmax(tt)) if not np.all(np.isnan(tt)) else 1.0
+
+        if obs_nan.any() and (~obs_nan).any():
+            edt_obs = distance_transform_edt(obs_nan) * cs
+            slope = obstacle_slope_factor * max_T
+            tt[obs_nan] = max_T + slope * edt_obs[obs_nan]
+        else:
+            tt[obs_nan] = max_T * (1.0 + obstacle_slope_factor * cs)
+
+        # ── Wall-repulsion potential ───────────────────────────────────
+        # Adds a quadratic penalty near walls so the gradient escapes the
+        # plateau created by the inflation zone.
+        if repulsion_radius > 0.0 and obstacle_mask.any() and free_mask.any():
+            edt_to_wall = distance_transform_edt(free_mask) * cs
+            peak_penalty = 3.0 * max_T  # wall_repulsion_strength = 3.0
+            near_wall = free_mask & (edt_to_wall < repulsion_radius)
+            if near_wall.any():
+                ratio = (repulsion_radius - edt_to_wall[near_wall]) / repulsion_radius
+                tt[near_wall] += peak_penalty * ratio * ratio
+
+        # ── Gradient → direction field ────────────────────────────────
+        d_row, d_col = np.gradient(tt, cs)
+        vx = -d_col  # col axis = x
+        vy = -d_row  # row axis = y
+
+        bad = np.isnan(vx) | np.isnan(vy) | np.isinf(vx) | np.isinf(vy)
+        vx[bad] = 0.0
+        vy[bad] = 0.0
+
+        # ── Gaussian smoothing before normalisation ────────────────────
+        if field_smooth_sigma > 0.0:
+            vx = gaussian_filter(vx, sigma=field_smooth_sigma)
+            vy = gaussian_filter(vy, sigma=field_smooth_sigma)
+
+        mag = np.sqrt(vx ** 2 + vy ** 2)
+        safe_mag = np.where(mag > 1e-8, mag, 1.0)
+        vx /= safe_mag
+        vy /= safe_mag
+
+        # Zero out directions inside obstacle cells
+        vx[obstacle_mask] = 0.0
+        vy[obstacle_mask] = 0.0
+
+        # ── Normalise travel time → phi in [0, 1] ─────────────────────
+        free_tt = tt.copy()
+        free_tt[obstacle_mask] = np.nan
+        finite_max = float(np.nanmax(free_tt)) if not np.all(np.isnan(free_tt)) else 1.0
+        if finite_max < 1e-12:
+            finite_max = 1.0
+        phi = np.clip(free_tt / finite_max, 0.0, 1.0)
+        phi[obstacle_mask] = 1.0  # obstacles at max potential
+
+        self._phi = phi
+        self._vx = vx
+        self._vy = vy
+        self._ready = True
+
+        n_reachable = int(np.isfinite(free_tt).sum())
+        print(
+            f"[FMMVectorField] FMM solve: {n_reachable} reachable cells, "
+            f"max_T={max_T:.2f}, repulsion r={repulsion_radius}m α={repulsion_alpha}"
+        )
+
+    # ------------------------------------------------------------------
+    # Query — same interface as VectorField
+    # ------------------------------------------------------------------
+
+    def query(self, wx: float, wy: float) -> np.ndarray:
+        if not self._ready:
+            return np.zeros(2)
+        if self._goal_world is not None:
+            gx_w, gy_w = self._goal_world
+            if (wx - gx_w) ** 2 + (wy - gy_w) ** 2 < self.ARRIVAL_RADIUS_M ** 2:
+                return np.zeros(2)
+
+        vx = self._bilinear(self._vx, wx, wy)
+        vy = self._bilinear(self._vy, wx, wy)
+        mag = math.sqrt(vx * vx + vy * vy)
+
+        if mag >= self._GRAD_THRESHOLD:
+            return np.array([vx / mag, vy / mag])
+
+        if self._goal_world is None:
+            return np.zeros(2)
+        gx_w, gy_w = self._goal_world
+        dx, dy = gx_w - wx, gy_w - wy
+        d = math.sqrt(dx * dx + dy * dy)
+        return np.zeros(2) if d < 1e-9 else np.array([dx / d, dy / d])
+
+    def potential(self, wx: float, wy: float) -> float:
+        if not self._ready:
+            return 0.0
+        return float(self._bilinear(self._phi, wx, wy))
+
+    # ------------------------------------------------------------------
+    # Bilinear interpolation (cell-centred) — same as VectorField
     # ------------------------------------------------------------------
 
     def _bilinear(self, arr: np.ndarray, wx: float, wy: float) -> float:
