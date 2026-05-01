@@ -2,3 +2,4 @@ arcade
 numpy
 scipy
 matplotlib
+scikit-fmm
