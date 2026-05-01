@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple
 
+import PIL.Image
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -143,6 +144,23 @@ def _bresenham(x0: int, y0: int, x1: int, y1: int) -> List[Tuple[int, int]]:
 # ---------------------------------------------------------------------------
 # Public loader
 # ---------------------------------------------------------------------------
+
+
+def load_map_from_bitmap(path: str) -> GridMap:
+    texture = PIL.Image.open(path)
+
+    # downsample
+    factor = 4
+    texture = texture.resize((texture.size[0] // factor, texture.size[1] // factor))
+
+    grid = np.array(texture.convert("1").getdata(), dtype=bool).reshape(
+        texture.size[::-1]
+    )
+
+    # invert
+    grid = ~grid
+
+    return GridMap(grid, 0.05, (10, 10), (grid.shape[1] - 1, grid.shape[0] - 1))
 
 
 def load_map(path: str) -> GridMap:

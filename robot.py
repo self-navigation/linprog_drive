@@ -66,13 +66,25 @@ class Robot:
     def x(self) -> float:
         return float(self.state[0])
 
+    @x.setter
+    def x(self, value: float):
+        self.state[0] = value
+
     @property
     def y(self) -> float:
         return float(self.state[1])
 
+    @y.setter
+    def y(self, value: float):
+        self.state[1] = value
+
     @property
     def theta(self) -> float:
         return float(self.state[2])
+
+    @theta.setter
+    def theta(self, value: float):
+        self.state[2] = value
 
     # ------------------------------------------------------------------
     # Dynamics

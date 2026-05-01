@@ -68,6 +68,19 @@ def _phi_to_color(phi: float) -> tuple:
     return (r, g, b, 255)
 
 
+def _collides_circle(
+    query_point: tuple[float, float],
+    circle_center: tuple[float, float],
+    radius: float,
+) -> bool:
+    """
+    Does the query_point fall within a circle with circle_center and radius?
+    """
+    return (query_point[0] - circle_center[0]) ** 2 + (
+        query_point[1] - circle_center[1]
+    ) ** 2 <= radius**2
+
+
 class Simulation(arcade.Window):
     """
     Main arcade window.
@@ -119,12 +132,16 @@ class Simulation(arcade.Window):
         # Compute vector field (Dijkstra geodesic distances — runs once at startup)
         gx_g, gy_g = grid_map.goal
         goal_world = grid_map.grid_to_world(gx_g, gy_g)
+
+        self.repulsion_radius = repulsion_radius
+        self.repulsion_alpha = repulsion_alpha
         self.vector_field.compute(
             grid_map,
             goal_world,
-            repulsion_radius=repulsion_radius,
-            repulsion_alpha=repulsion_alpha,
+            repulsion_radius=self.repulsion_radius,
+            repulsion_alpha=self.repulsion_alpha,
         )
+        self.vector_field_invalidated = False
 
         # Track last commands for HUD display
         self._last_v: float = 0.0
@@ -149,16 +166,25 @@ class Simulation(arcade.Window):
     # Coordinate helpers
     # ------------------------------------------------------------------
 
+    @property
+    def w2s_scale(self) -> float:
+        return self.cell_px / self.grid_map.cell_size
+
     def world_to_screen(self, wx: float, wy: float) -> Tuple[float, float]:
         """Convert world metres → screen pixels."""
-        scale = self.cell_px / self.grid_map.cell_size
-        return wx * scale, wy * scale
+        return wx * self.w2s_scale, wy * self.w2s_scale
 
     def cell_center_screen(self, gx: int, gy: int) -> Tuple[float, float]:
         """Return the screen pixel centre of a grid cell."""
         px = (gx + 0.5) * self.cell_px
         py = (gy + 0.5) * self.cell_px
         return px, py
+
+    def screen_to_cell(self, sx: int, sy: int) -> Tuple[int, int]:
+        """Convert screen pixels → grid cell."""
+        gx = sx // self.cell_px
+        gy = sy // self.cell_px
+        return int(gx), int(gy)
 
     # ------------------------------------------------------------------
     # Grid sprite lists (built once after vector field is computed)
@@ -227,6 +253,9 @@ class Simulation(arcade.Window):
         self.clear()
 
         # Draw layers back-to-front
+        self._run_ui()
+
+    def _run_ui(self) -> None:
         self._draw_grid()
         self._draw_goal()
         self._draw_robot()
@@ -235,22 +264,57 @@ class Simulation(arcade.Window):
                 self._draw_colorbar()
             self._draw_hud()
 
-    def on_key_press(self, key: int, modifiers: int) -> None:
-        if key == arcade.key.ESCAPE:
+    def on_key_press(self, symbol: int, modifiers: int) -> None:
+        if symbol == arcade.key.ESCAPE:
             self.close()
-        elif key == arcade.key.V:
+        elif symbol == arcade.key.V:
             self._view_gradient = not self._view_gradient
-        elif key == arcade.key.Q:
+        elif symbol == arcade.key.Q:
             self._show_ui = not self._show_ui
-        elif key == arcade.key.SPACE:
+        elif symbol == arcade.key.SPACE:
             self._paused = not self._paused
-        elif key == arcade.key.TAB:
+        elif symbol == arcade.key.TAB:
             self._solver_idx = (self._solver_idx + 1) % len(self._solvers)
             self.solver = self._solvers[self._solver_idx]
-        self.solver.on_key_press(key)
+        else:
+            self.solver.on_key_press(symbol)
 
-    def on_key_release(self, key: int, modifiers: int) -> None:
-        self.solver.on_key_release(key)
+    def on_key_release(self, symbol: int, modifiers: int) -> None:
+        self.solver.on_key_release(symbol)
+
+    def on_mouse_drag(
+        self, x: int, y: int, dx: int, dy: int, buttons: int, modifiers: int
+    ) -> None:
+        # if the mouse is within the robot circle:
+        sx, sy = self.world_to_screen(self.robot.x, self.robot.y)
+        if _collides_circle((x, y), (sx, sy), self.robot.RADIUS_M * self.w2s_scale):
+            # translate robot
+            self.robot.x += dx / self.w2s_scale
+            self.robot.y += dy / self.w2s_scale
+            return
+
+        # if the mouse is within the goal circle:
+        gx, gy = self.grid_map.goal
+        cx, cy = self.cell_center_screen(gx, gy)
+        if _collides_circle((x, y), (cx, cy), self.robot.RADIUS_M * self.w2s_scale):
+            # translate goal
+            self.grid_map.goal = self.screen_to_cell(x + dx, y + dy)
+            self.vector_field_invalidated = True
+
+    def on_mouse_release(self, x: int, y: int, button: int, modifiers: int) -> None:
+        if self.vector_field_invalidated:
+            gx_g, gy_g = self.grid_map.goal
+            goal_world = self.grid_map.grid_to_world(gx_g, gy_g)
+
+            # recompute gradient
+            self.vector_field.compute(
+                self.grid_map,
+                goal_world,
+                repulsion_radius=self.repulsion_radius,
+                repulsion_alpha=self.repulsion_alpha,
+            )
+
+            self._sprites_gradient = self._build_sprites_gradient()
 
     # ------------------------------------------------------------------
     # Drawing helpers
