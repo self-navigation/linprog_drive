@@ -5,6 +5,7 @@ Entry point — parses CLI arguments and launches the arcade window.
 
 import argparse
 import sys
+from pathlib import Path
 
 
 def parse_args():
@@ -76,14 +77,17 @@ def main():
         sys.exit(1)
 
     try:
-        from map import load_map_from_bitmap
+        from map import load_map_from_bitmap, load_map
     except ImportError as e:
         print(f"ERROR: could not import map module: {e}")
         sys.exit(1)
 
     # Load and validate map first (fast, gives clear errors before opening window)
     try:
-        grid_map = load_map_from_bitmap(args.map)
+        if Path(args.map).suffix == ".map":
+            grid_map = load_map(args.map)
+        else:
+            grid_map = load_map_from_bitmap(args.map)
     except FileNotFoundError:
         print(f"ERROR: map file not found: {args.map!r}")
         sys.exit(1)
