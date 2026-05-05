@@ -640,3 +640,357 @@ class FMMVectorField:
             + arr[gy1, gx0] * (1 - tx) * ty
             + arr[gy1, gx1] * tx * ty
         )
+
+
+# ---------------------------------------------------------------------------
+# NaN-aware Gaussian smoothing (used by FM2VectorField)
+# ---------------------------------------------------------------------------
+
+
+def _gaussian_with_nan(arr: np.ndarray, sigma_cells: float) -> np.ndarray:
+    """Gaussian smoothing that treats NaN cells as missing data.
+
+    Standard gaussian_filter propagates NaN values into all neighbours
+    within the kernel radius, corrupting the entire inflation band around
+    every obstacle.  The normalised-convolution formulation (Knutsson &
+    Westin 1993) instead weights each sample by its validity flag, so only
+    finite neighbours contribute to each output sample.
+
+        out[x] = sum_y( w(x-y) * f(y) * valid(y) )
+                 / sum_y( w(x-y) * valid(y) )
+
+    Cells that were NaN in the input remain NaN in the output.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    valid = np.isfinite(arr).astype(np.float64)
+    filled = np.where(valid > 0, arr, 0.0)
+    num = gaussian_filter(filled, sigma_cells)
+    den = gaussian_filter(valid, sigma_cells)
+    out = np.where(den > 1e-6, num / np.maximum(den, 1e-6), np.nan)
+    out[~np.isfinite(arr)] = np.nan  # propagate the original NaN mask exactly
+    return out
+
+
+# ---------------------------------------------------------------------------
+# FM2 vector field  (Fast Marching Square — matches ROS2 FMMVectorFieldNode)
+# ---------------------------------------------------------------------------
+
+
+class FM2VectorField:
+    """
+    Fast Marching Square (FM2) navigation field.
+
+    Matches the pipeline in the ROS2 FMMVectorFieldNode (_recompute_field).
+    The three improvements over FMMVectorField are:
+
+    1. Smoothing is applied to T BEFORE differentiation (not to the gradient
+       components afterwards).  Smoothing the gradient components introduces
+       curl and creates unstable directions at FMM cut loci; smoothing T
+       preserves the scalar-potential (irrotational) structure of the field.
+       The helper _gaussian_with_nan is used so that obstacle NaN cells do
+       not corrupt the smoothed values at adjacent free cells.
+
+    2. Linear speed profile option.  The existing FMMVectorField uses only an
+       exponential decay; the linear profile gives a sharper, map-width-
+       independent repulsion band and is the recommended default.
+
+    3. Confidence magnitude.  In FM2, the eikonal equation guarantees
+       |grad T| = 1/v in every smooth region, so |grad T| * v = 1 is the
+       expected value.  The product drops to 0 at FMM cut loci (where the
+       gradient direction is ambiguous) and near the goal (where T -> 0 and
+       the direction is undefined).  This is exposed via the confidence
+       property so a downstream planner can weight the field by reliability.
+
+    Interface
+    ---------
+    Same as VectorField and FMMVectorField:
+        vf = FM2VectorField()
+        vf.compute(grid_map, goal_world)
+        direction = vf.query(wx, wy)   # unit vector toward goal
+        phi       = vf.phi             # normalised T in [0, 1]
+        conf      = vf.confidence      # |grad T| * v, shape (rows, cols)
+    """
+
+    ARRIVAL_RADIUS_M: float = 0.15
+    _GRAD_THRESHOLD: float = 1e-6
+
+    def __init__(self) -> None:
+        self._phi: np.ndarray | None = None
+        self._vx: np.ndarray | None = None
+        self._vy: np.ndarray | None = None
+        self._mag: np.ndarray | None = None  # confidence: |grad T| * v
+        self._cs: float = 1.0
+        self._goal_world: tuple[float, float] | None = None
+        self._ready: bool = False
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    @property
+    def phi(self) -> np.ndarray | None:
+        """Normalised travel time T / T_max in [0, 1], shape (rows, cols)."""
+        return self._phi
+
+    @property
+    def confidence(self) -> np.ndarray | None:
+        """Speed-corrected gradient magnitude |grad T| * v.
+
+        Approximately 1.0 everywhere the FM2 field is well-defined.
+        Collapses toward 0 at FMM cut loci and at the goal, marking cells
+        where the published direction is unreliable.
+        """
+        return self._mag
+
+    # ------------------------------------------------------------------
+    # Compute
+    # ------------------------------------------------------------------
+
+    def compute(
+        self,
+        grid_map: GridMap,
+        goal_world: Tuple[float, float],
+        repulsion_radius: float = 0.5,
+        repulsion_alpha="unused",
+        speed_v_min: float = 0.1,
+        speed_v_max: float = 1.0,
+        speed_profile: str = "linear",
+        smooth_T_sigma: float = 0.0,
+    ) -> None:
+        """
+        Run the FM2 pipeline and store the unit navigation field.
+
+        Parameters
+        ----------
+        grid_map         : GridMap with boolean obstacle grid and cell_size.
+        goal_world       : (wx, wy) goal position in metres.
+        inflation_radius : Clearance band width (metres).  Cells whose EDT
+                           distance to the nearest obstacle is less than this
+                           get reduced wave speed, steering paths away from
+                           walls.  Default 0.5 m.
+        speed_v_min      : Wave speed at the obstacle surface.  Must be > 0
+                           (the eikonal equation diverges as v -> 0).  Lower
+                           values push paths further from walls at the cost of
+                           a stronger speed gradient in the band.  Default 0.1.
+        speed_v_max      : Wave speed in open space (beyond inflation_radius).
+                           Default 1.0.
+        speed_profile    : "linear" (default) or "exponential".
+                           linear      — v rises linearly from speed_v_min at
+                                         the wall to speed_v_max at the band
+                                         edge.  Sharp boundary, lower cost.
+                           exponential — v = speed_v_max * exp(-k*(1-norm)),
+                                         where k = ln(v_max/v_min), so v
+                                         exactly equals speed_v_min at the wall
+                                         and speed_v_max at the band edge.
+                                         Long-tailed: nudges paths toward
+                                         corridor centrelines even in wide
+                                         spaces.
+        smooth_T_sigma   : Gaussian smoothing sigma applied to T BEFORE the
+                           gradient operator, in metres.  0 = disabled
+                           (default).  Re-enable if you see zig-zagging across
+                           narrow corridor centrelines caused by FMM cut loci.
+                           Values between 0.05 m and 0.15 m are typical.
+        """
+        try:
+            import skfmm
+        except ImportError as exc:
+            raise ImportError(
+                "FM2VectorField requires skfmm: pip install scikit-fmm"
+            ) from exc
+        from scipy.ndimage import distance_transform_edt
+
+        self._cs = grid_map.cell_size
+        self._goal_world = goal_world
+        cs = grid_map.cell_size
+        obstacle_mask = grid_map.grid
+        gx_g, gy_g = grid_map.goal
+
+        if obstacle_mask[gy_g, gx_g]:
+            print("[FM2VectorField] Goal cell is inside an obstacle — aborting.")
+            return
+
+        # ── 1. EDT: free-cell distance to nearest obstacle ────────────
+        edt_free = distance_transform_edt(~obstacle_mask) * cs
+
+        # ── 2. Speed field  v(d) ──────────────────────────────────────
+        speed = self._build_speed(
+            edt_free,
+            obstacle_mask,
+            repulsion_radius,
+            speed_v_min,
+            speed_v_max,
+            speed_profile,
+        )
+
+        # ── 3. FMM: solve eikonal from goal ───────────────────────────
+        phi_init = np.ones(obstacle_mask.shape, dtype=np.float64)
+        phi_init[gy_g, gx_g] = -1.0
+        phi_ma = np.ma.MaskedArray(phi_init, mask=obstacle_mask)
+        spd_ma = np.ma.MaskedArray(speed, mask=obstacle_mask)
+
+        try:
+            raw = skfmm.travel_time(phi_ma, spd_ma, dx=cs)
+        except Exception as exc:
+            print(f"[FM2VectorField] FMM failed: {exc}")
+            return
+
+        tt = np.array(raw, dtype=np.float64)
+        if np.ma.is_masked(raw):
+            tt[raw.mask] = np.nan
+
+        # ── 4. Optional NaN-aware T smoothing (cut-locus fix) ─────────
+        # Smooth T before differentiation, not the gradient components.
+        # Smoothing vx/vy afterwards introduces curl; smoothing T beforehand
+        # preserves the irrotational structure of the field.  The NaN-aware
+        # convolution is essential here: standard gaussian_filter would
+        # corrupt free cells adjacent to obstacle NaN cells.
+        if smooth_T_sigma > 0.0:
+            tt_for_grad = _gaussian_with_nan(tt, smooth_T_sigma / cs)
+        else:
+            tt_for_grad = tt.copy()
+
+        # ── 5. Gradient → unit field and confidence ───────────────────
+        # Fill obstacle NaN cells with a large flat value so the gradient
+        # stencil at adjacent free cells points outward (recovery direction)
+        # without the exponentially growing fill used by FMMVectorField.
+        # A factor of 4 * T_max is sufficient to dominate any free-cell
+        # value while keeping the gradient magnitude finite.
+        finite_vals = tt_for_grad[np.isfinite(tt_for_grad)]
+        big = float(finite_vals.max()) * 4.0 + 1.0 if finite_vals.size else 1.0
+        tt_diff = np.where(obstacle_mask, big, tt_for_grad)
+
+        d_row, d_col = np.gradient(tt_diff, cs)
+        raw_vx = -d_col  # col = x axis
+        raw_vy = -d_row  # row = y axis
+
+        raw_mag = np.sqrt(raw_vx**2 + raw_vy**2)
+        safe = np.where(raw_mag > 1e-8, raw_mag, 1.0)
+        vx = raw_vx / safe
+        vy = raw_vy / safe
+
+        # Confidence: |grad T| * v.  The eikonal equation gives |grad T| = 1/v
+        # in smooth regions, so the product is ~1 everywhere the field is
+        # reliable.  It collapses to 0 at cut loci (ambiguous gradient) and
+        # at the goal (T -> 0, direction undefined).
+        mag = raw_mag * speed
+
+        bad = ~np.isfinite(vx) | ~np.isfinite(vy)
+        vx[bad] = 0.0
+        vy[bad] = 0.0
+        mag[bad] = 0.0  # zero confidence, not NaN, so the planner can compare
+        vx[obstacle_mask] = 0.0
+        vy[obstacle_mask] = 0.0
+
+        # ── 6. Normalise T -> phi in [0, 1] for display / other views ─
+        free_tt = tt.copy()
+        free_tt[obstacle_mask] = np.nan
+        t_max = float(np.nanmax(free_tt)) if not np.all(np.isnan(free_tt)) else 1.0
+        if t_max < 1e-12:
+            t_max = 1.0
+        phi = np.clip(free_tt / t_max, 0.0, 1.0)
+        phi[obstacle_mask] = 1.0
+
+        self._phi = phi
+        self._vx = vx
+        self._vy = vy
+        self._mag = mag
+        self._ready = True
+
+        n_reachable = int(np.isfinite(free_tt).sum())
+        print(
+            f"[FM2VectorField] {n_reachable} reachable cells, "
+            f"T_max={t_max:.2f}, profile={speed_profile!r}, "
+            f"R={repulsion_radius}m, v=[{speed_v_min},{speed_v_max}], "
+            f"smooth_sigma={smooth_T_sigma}m"
+        )
+
+    # ------------------------------------------------------------------
+    # Speed field construction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_speed(
+        edt_free: np.ndarray,
+        obstacle_mask: np.ndarray,
+        inflation_radius: float,
+        speed_v_min: float,
+        speed_v_max: float,
+        speed_profile: str,
+    ) -> np.ndarray:
+        speed = np.full_like(edt_free, speed_v_max)
+        if inflation_radius <= 0.0:
+            return speed
+
+        near = ~obstacle_mask & (edt_free < inflation_radius)
+        if not near.any():
+            return speed
+
+        norm = edt_free[near] / inflation_radius  # 0 at wall, 1 at band edge
+
+        if speed_profile == "exponential":
+            # k = ln(v_max/v_min) ensures v(0) = v_min and v(1) = v_max exactly.
+            k = math.log(max(speed_v_max / speed_v_min, 1e-8))
+            speed[near] = speed_v_max * np.exp(-k * (1.0 - norm))
+        else:
+            # Linear: sharp band, simpler, the recommended default.
+            speed[near] = speed_v_min + (speed_v_max - speed_v_min) * norm
+
+        # Clip defensively; eikonal diverges if v reaches 0.
+        speed[near] = np.clip(speed[near], speed_v_min, speed_v_max)
+        return speed
+
+    # ------------------------------------------------------------------
+    # Query — same interface as VectorField / FMMVectorField
+    # ------------------------------------------------------------------
+
+    def query(self, wx: float, wy: float) -> np.ndarray:
+        if not self._ready:
+            return np.zeros(2)
+        if self._goal_world is not None:
+            gx_w, gy_w = self._goal_world
+            if (wx - gx_w) ** 2 + (wy - gy_w) ** 2 < self.ARRIVAL_RADIUS_M**2:
+                return np.zeros(2)
+
+        vx = self._bilinear(self._vx, wx, wy)
+        vy = self._bilinear(self._vy, wx, wy)
+        mag = math.sqrt(vx * vx + vy * vy)
+
+        if mag >= self._GRAD_THRESHOLD:
+            return np.array([vx / mag, vy / mag])
+
+        if self._goal_world is None:
+            return np.zeros(2)
+        gx_w, gy_w = self._goal_world
+        dx, dy = gx_w - wx, gy_w - wy
+        d = math.sqrt(dx * dx + dy * dy)
+        return np.zeros(2) if d < 1e-9 else np.array([dx / d, dy / d])
+
+    def potential(self, wx: float, wy: float) -> float:
+        if not self._ready:
+            return 0.0
+        return float(self._bilinear(self._phi, wx, wy))
+
+    # ------------------------------------------------------------------
+    # Bilinear interpolation (cell-centred) — same as VectorField
+    # ------------------------------------------------------------------
+
+    def _bilinear(self, arr: np.ndarray, wx: float, wy: float) -> float:
+        cs = self._cs
+        rows, cols = arr.shape
+        gxf = wx / cs - 0.5
+        gx0 = int(math.floor(gxf))
+        tx = gxf - gx0
+        gyf = wy / cs - 0.5
+        gy0 = int(math.floor(gyf))
+        ty = gyf - gy0
+        gx0 = max(0, min(gx0, cols - 1))
+        gx1 = min(gx0 + 1, cols - 1)
+        gy0 = max(0, min(gy0, rows - 1))
+        gy1 = min(gy0 + 1, rows - 1)
+        return (
+            arr[gy0, gx0] * (1 - tx) * (1 - ty)
+            + arr[gy0, gx1] * tx * (1 - ty)
+            + arr[gy1, gx0] * (1 - tx) * ty
+            + arr[gy1, gx1] * tx * ty
+        )

@@ -25,7 +25,7 @@ import arcade
 from map import GridMap
 from robot import Robot
 from solver import BaseSolver, ChebSolver, KeyboardSolver, GradientSolver, LPSolver
-from vector_field import FMMVectorField, VectorField
+from vector_field import FM2VectorField, FMMVectorField, VectorField
 from grid_views import VIEWS, GridView
 
 # ---------------------------------------------------------------------------
@@ -87,6 +87,14 @@ class Simulation(arcade.Window):
         # ------------------------------------------------------------------
         # self.vector_field = VectorField()
         self.vector_field = FMMVectorField()
+
+        self._vector_fields = [
+            VectorField(),
+            FMMVectorField(),
+            FM2VectorField(),
+        ]
+        self._vector_idx = 0
+        self._vector = self._vector_fields[0]
 
         # Ordered list of available solvers — Tab cycles through them
         self._solvers: list[BaseSolver] = [
@@ -228,6 +236,11 @@ class Simulation(arcade.Window):
             self._show_ui = not self._show_ui
         elif symbol == arcade.key.SPACE:
             self._paused = not self._paused
+        elif symbol == arcade.key.F:
+            self._vector_idx += 1
+            self._vector_idx %= len(self._vector_fields)
+            self.vector_field = self._vector_fields[self._vector_idx]
+            self._invalidate_vector_field()
         elif symbol == arcade.key.TAB:
             self._solver_idx = (self._solver_idx + 1) % len(self._solvers)
             self.solver = self._solvers[self._solver_idx]
@@ -481,7 +494,7 @@ class Simulation(arcade.Window):
         font_size = 12
         line_h = 18
         pad = 8
-        n_lines = 6
+        n_lines = 7
         start_y = self.height - pad - font_size
         return [
             arcade.Text(
@@ -514,8 +527,9 @@ class Simulation(arcade.Window):
                 if hasattr(self.solver, "last_status")
                 else ""
             ),
-            f"view  : {view_label}",
-            "[ESC] quit  [SPACE] pause  [TAB] solver  [V] view  [Q] UI  [WASD] drive",
+            f"[V]iew  : {view_label}",
+            f"[F]ield : {self.vector_field.__class__.__name__}",
+            "[ESC] quit  [SPACE] pause  [TAB] solver [Q] UI [WASD] drive",
         ]
 
         for t, s in zip(self._hud_texts, strings):
@@ -527,13 +541,13 @@ class Simulation(arcade.Window):
         line_h = 18
         pad = 8
         panel_h = len(strings) * line_h + pad * 2
-        panel_w = 510
+        panel_w = 550
         arcade.draw_lbwh_rectangle_filled(
             0,
             self.height - panel_h,
             panel_w,
             panel_h,
-            (20, 20, 30, 200),
+            (20, 20, 30, 160),
         )
 
         for t in self._hud_texts:
