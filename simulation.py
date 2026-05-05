@@ -24,8 +24,8 @@ import arcade
 
 from map import GridMap
 from robot import Robot
-from solver import BaseSolver, KeyboardSolver, GradientSolver, LPSolver
-from vector_field import FMMVectorField
+from solver import BaseSolver, ChebSolver, KeyboardSolver, GradientSolver, LPSolver
+from vector_field import FMMVectorField, VectorField
 from grid_views import VIEWS, GridView
 
 # ---------------------------------------------------------------------------
@@ -35,18 +35,12 @@ from grid_views import VIEWS, GridView
 # Robot radius comes from Robot.RADIUS_M so rendering and physics stay in sync.
 
 # Colour palette — all as RGBA 4-tuples (arcade 3.x requires alpha channel)
-_COL_OBSTACLE = (55, 55, 65, 255)
-_COL_FREE = (185, 188, 195, 255)  # muted mid-grey, easy on the eyes
 _COL_GOAL_FILL = (70, 210, 90, 110)  # semi-transparent green
 _COL_GOAL_RING = (30, 170, 55, 255)  # solid outline
 _COL_GOAL_X = (15, 110, 35, 255)  # darker inscribed X
 _COL_ROBOT_FILL = (220, 60, 60, 255)
 _COL_ROBOT_EDGE = (140, 20, 20, 255)
-_COL_HUD_TEXT = (0, 0, 0, 255)
 _COL_BACKGROUND = (140, 143, 150, 255)  # matches free cell tone so gaps blend
-
-
-
 
 
 def _collides_circle(
@@ -91,6 +85,7 @@ class Simulation(arcade.Window):
         # ------------------------------------------------------------------
         # Instantiate modules
         # ------------------------------------------------------------------
+        # self.vector_field = VectorField()
         self.vector_field = FMMVectorField()
 
         # Ordered list of available solvers — Tab cycles through them
@@ -98,6 +93,7 @@ class Simulation(arcade.Window):
             KeyboardSolver(),
             GradientSolver(),
             LPSolver(),
+            ChebSolver(),
         ]
         self._solver_idx: int = 0
         self.solver: BaseSolver = self._solvers[0]

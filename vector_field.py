@@ -49,9 +49,11 @@ Obstacle cells are masked out so FMM skips them; they are then filled
 with an EDT-based depth penalty so the gradient inside walls always
 points toward the nearest free cell (recovery direction).
 
-An optional wall-repulsion potential and Gaussian direction smoothing
-(ported from the ROS2 FMMVectorFieldNode) are applied before the final
-unit-vector normalisation.
+Gaussian direction smoothing is applied before the final unit-vector
+normalisation.  The wall-repulsion potential originally ported from the
+ROS2 FMMVectorFieldNode has been removed: the speed-field slowdown near
+obstacles is sufficient and the explicit penalty was strong enough to
+owerwhelm goal-seeking in narrow corridors.
 """
 
 from __future__ import annotations
@@ -163,15 +165,36 @@ class VectorField:
         if t_max < 1e-12:
             t_max = 1.0
 
-        phi = nav.copy()
-        phi[~finite] = t_max  # obstacle cells → plateau
-        phi /= t_max
-        self._phi = phi
+        # Fill obstacle cells with a depth-increasing value rather than a flat
+        # plateau.  A flat plateau (all obstacles = t_max) creates a hard step
+        # at every wall boundary; np.gradient then produces a large artificial
+        # repulsion component at every adjacent free cell that overwhelms the
+        # real navigation gradient and causes the robot to orbit.  The
+        # depth-based fill creates a smooth outward slope inside obstacles so
+        # the gradient at free cells reflects the actual flow direction.
+        from scipy.ndimage import distance_transform_edt, gaussian_filter
 
-        # ── 5. Vector field = -grad(phi) ─────────────────────────────
+        obs_mask = ~finite
+        nav_filled = nav.copy()
+        if obs_mask.any() and finite.any():
+            edt_depth = distance_transform_edt(obs_mask) * self._cs
+            nav_filled[obs_mask] = t_max + 400.0 * t_max * edt_depth[obs_mask]
+        else:
+            nav_filled[obs_mask] = t_max
+
+        phi = nav_filled / t_max
+        # Clamp to [0, 1] for display; the depth fill can exceed 1.0 inside
+        # obstacles but that is only used for gradient computation.
+        self._phi = np.clip(phi, 0.0, 1.0)
+
+        # ── 5. Vector field = -grad(phi), smoothed ───────────────────
+        # A light Gaussian blur removes staircase artifacts from 8-connected
+        # Dijkstra paths before the unit-vector normalisation in query().
         grad = np.gradient(phi)
-        self._vy = -grad[0]  # axis-0 is rows = y
-        self._vx = -grad[1]  # axis-1 is cols = x
+        vx_raw = -grad[1]  # axis-1 is cols = x
+        vy_raw = -grad[0]  # axis-0 is rows = y
+        self._vx = gaussian_filter(vx_raw, sigma=1.5)
+        self._vy = gaussian_filter(vy_raw, sigma=1.5)
         self._vx[grid_map.grid] = 0.0
         self._vy[grid_map.grid] = 0.0
 
@@ -513,16 +536,12 @@ class FMMVectorField:
         else:
             tt[obs_nan] = max_T * (1.0 + obstacle_slope_factor * cs)
 
-        # ── Wall-repulsion potential ───────────────────────────────────
-        # Adds a quadratic penalty near walls so the gradient escapes the
-        # plateau created by the inflation zone.
-        if repulsion_radius > 0.0 and obstacle_mask.any() and free_mask.any():
-            edt_to_wall = distance_transform_edt(free_mask) * cs
-            peak_penalty = 3.0 * max_T  # wall_repulsion_strength = 3.0
-            near_wall = free_mask & (edt_to_wall < repulsion_radius)
-            if near_wall.any():
-                ratio = (repulsion_radius - edt_to_wall[near_wall]) / repulsion_radius
-                tt[near_wall] += peak_penalty * ratio * ratio
+        # The explicit wall-repulsion potential was removed.  The speed
+        # field (exponential slowdown near walls) already makes the FMM
+        # travel time increase steeply near obstacles.  Adding a second
+        # penalty of 3*max_T magnitude caused the wall-avoidance gradient
+        # to dominate the goal-seeking gradient in any narrow corridor,
+        # producing circular orbits rather than convergent paths.
 
         # ── Gradient → direction field ────────────────────────────────
         d_row, d_col = np.gradient(tt, cs)
@@ -538,7 +557,7 @@ class FMMVectorField:
             vx = gaussian_filter(vx, sigma=field_smooth_sigma)
             vy = gaussian_filter(vy, sigma=field_smooth_sigma)
 
-        mag = np.sqrt(vx ** 2 + vy ** 2)
+        mag = np.sqrt(vx**2 + vy**2)
         safe_mag = np.where(mag > 1e-8, mag, 1.0)
         vx /= safe_mag
         vy /= safe_mag
@@ -576,7 +595,7 @@ class FMMVectorField:
             return np.zeros(2)
         if self._goal_world is not None:
             gx_w, gy_w = self._goal_world
-            if (wx - gx_w) ** 2 + (wy - gy_w) ** 2 < self.ARRIVAL_RADIUS_M ** 2:
+            if (wx - gx_w) ** 2 + (wy - gy_w) ** 2 < self.ARRIVAL_RADIUS_M**2:
                 return np.zeros(2)
 
         vx = self._bilinear(self._vx, wx, wy)
